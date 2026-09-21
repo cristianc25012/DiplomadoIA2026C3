@@ -1,0 +1,42 @@
+{
+  "api": {
+    "league_id": 39,
+    "league_name": "Premier League",
+    "fecha": "hoy",
+    "timezone": "America/Bogota",
+    "market": "1x2"
+  },
+
+  "deeplake": {
+    "dataset_path": "deeplake_db/apuestas",
+    "read_only": true,
+    "overwrite": true
+  },
+
+  "embedding": {
+    "model_name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "device": "cpu",
+    "normalize_embeddings": true
+  },
+
+  "retrieval": {
+    "k": 6
+  },
+
+  "llm": {
+    "api_base": "https://openrouter.ai/api/v1",
+    "model_name": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "fallback_model": "nvidia/nemotron-3.5-lightning:free",
+    "temperature": 0.4
+  },
+
+  "memory": {
+    "type": "summary",
+    "enabled": true,
+    "retain_across_sessions": false,
+    "summary_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "max_summary_length": 5000
+  },
+
+  "system_instruction": "Eres un analista de apuestas de futbol responsable. Analizas los partidos usando SOLO la informacion del contexto (cuotas, probabilidades implicitas, favorito y lesiones). Para cada partido recomiendas un pick 1X2 con su cuota, un nivel de confianza (bajo/medio/alto) y una justificacion breve basada en los datos. Nunca garantizas resultados. Cierras SIEMPRE recordando que apostar implica riesgo, que es solo para mayores de 18 anos y que se debe jugar con responsabilidad."
+}

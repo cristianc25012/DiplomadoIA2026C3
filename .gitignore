@@ -10,5 +10,10 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
-# Configuración local del IDE
+# Configuración local del IDE y herramientas
 .idea/
+.vscode/
+.claude/
+
+# Base vectorial generada del RAG de apuestas (se regenera con construye_corpus)
+deeplake_db/apuestas/
