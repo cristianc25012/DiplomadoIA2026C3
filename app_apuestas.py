@@ -77,6 +77,27 @@ st.markdown(
     }
     .stButton>button:hover { border-color: var(--verde); color: var(--verde); }
     .disc { color: var(--tenue); font-size:.78rem; line-height:1.4; }
+
+    /* Indicador "pensando" con frases rotativas (animado por CSS en el navegador,
+       sigue cambiando aunque el servidor espere la respuesta del modelo). */
+    .pensando {
+        font-family:'Rajdhani'; font-weight:600; font-size:1.02rem;
+        color: var(--verde); padding:4px 0; animation: pulso 1.4s ease-in-out infinite;
+    }
+    .pensando::after {
+        content: "⚽ Calentando en la banda…";
+        animation: frases 16s linear infinite;
+    }
+    @keyframes pulso { 0%,100%{opacity:.5;} 50%{opacity:1;} }
+    @keyframes frases {
+        0%,12%    { content: "⚽ Calentando en la banda…"; }
+        14%,26%   { content: "📊 Analizando partidos previos…"; }
+        28%,40%   { content: "🧮 Calculando probabilidades implícitas…"; }
+        42%,54%   { content: "🔎 Revisando lesiones y bajas…"; }
+        56%,68%   { content: "💧 Bebiendo agua…"; }
+        70%,82%   { content: "📈 Comparando cuotas de las casas…"; }
+        84%,98%   { content: "🧠 Pensando el mejor pick…"; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -195,11 +216,19 @@ if pregunta:
         historial.append(cls(content=m["content"]))
 
     with st.chat_message("assistant", avatar="⚽"):
+        ph = st.empty()
+        # Indicador animado mientras el modelo "piensa" (antes del primer token).
+        ph.markdown('<div class="pensando"></div>', unsafe_allow_html=True)
+        respuesta = ""
         try:
-            gen = responder_stream(llms, recuperador, sys_inst, pregunta, historial)
-            respuesta = st.write_stream(gen)
+            for trozo in responder_stream(llms, recuperador, sys_inst, pregunta, historial):
+                respuesta += trozo
+                ph.markdown(respuesta)  # el primer token reemplaza el "pensando…"
+            if not respuesta:
+                respuesta = "No obtuve respuesta del modelo. Intenta de nuevo."
+                ph.markdown(respuesta)
         except Exception as e:  # noqa: BLE001
             respuesta = f"Ups, el modelo falló (posible rate-limit del free tier): {e}"
-            st.markdown(respuesta)
+            ph.markdown(respuesta)
 
     st.session_state.mensajes.append({"role": "assistant", "content": respuesta})
