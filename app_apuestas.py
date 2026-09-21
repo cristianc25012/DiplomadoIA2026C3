@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
 
 from ChatApuestas import (
-    load_config, Recuperador, construir_llm, responder, ENV_FILE, PROJECT_ROOT,
+    load_config, Recuperador, construir_llms, responder_stream, ENV_FILE, PROJECT_ROOT,
 )
 
 CONFIG_PATH = PROJECT_ROOT / "config_apuestas.json"
@@ -95,12 +95,12 @@ def iniciar():
         st.error("No se encontró OPENAI_API_KEY en secrets/.env")
         st.stop()
     recuperador = Recuperador(cfg)
-    llm = construir_llm(cfg, api_key)
-    return cfg, recuperador, llm
+    llms = construir_llms(cfg, api_key)
+    return cfg, recuperador, llms
 
 
 try:
-    cfg, recuperador, llm = iniciar()
+    cfg, recuperador, llms = iniciar()
 except FileNotFoundError:
     st.error("No existe la base. Ejecuta primero: `python -m apuestas.construye_corpus`")
     st.stop()
@@ -195,11 +195,11 @@ if pregunta:
         historial.append(cls(content=m["content"]))
 
     with st.chat_message("assistant", avatar="⚽"):
-        with st.spinner("Analizando cuotas y lesiones…"):
-            try:
-                respuesta, _ = responder(llm, recuperador, sys_inst, pregunta, historial)
-            except Exception as e:  # noqa: BLE001
-                respuesta = f"Ups, el modelo falló (posible rate-limit del free tier): {e}"
-        st.markdown(respuesta)
+        try:
+            gen = responder_stream(llms, recuperador, sys_inst, pregunta, historial)
+            respuesta = st.write_stream(gen)
+        except Exception as e:  # noqa: BLE001
+            respuesta = f"Ups, el modelo falló (posible rate-limit del free tier): {e}"
+            st.markdown(respuesta)
 
     st.session_state.mensajes.append({"role": "assistant", "content": respuesta})

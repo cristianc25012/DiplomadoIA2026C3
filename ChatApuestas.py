@@ -140,20 +140,30 @@ def _crear_chat(cfg: Dict, api_key: str, model_name: str) -> ChatOpenAI:
         temperature=float(llm_cfg.get("temperature", 0.4)),
         timeout=60,
         max_retries=1,  # ante 429 cae rápido al fallback en vez de reintentar mucho
+        streaming=True,
     )
 
 
-def construir_llm(cfg: Dict, api_key: str):
-    """LLM principal con herramientas y fallback automático ante 429/errores."""
+def construir_llms(cfg: Dict, api_key: str) -> List:
+    """Modelos con herramientas, en orden de preferencia: [principal, fallback].
+
+    Se devuelve como LISTA (no como `with_fallbacks`) porque el streaming a
+    través de RunnableWithFallbacks se bufferiza y se pierde el token-a-token;
+    el fallback en streaming se maneja a mano en `responder_stream`.
+    """
     llm_cfg = cfg["llm"]
     herramientas = [refrescar_cuotas]
-
-    principal = _crear_chat(cfg, api_key, llm_cfg["model_name"]).bind_tools(herramientas)
+    modelos = [_crear_chat(cfg, api_key, llm_cfg["model_name"]).bind_tools(herramientas)]
     fb_name = llm_cfg.get("fallback_model")
     if fb_name:
-        fallback = _crear_chat(cfg, api_key, fb_name).bind_tools(herramientas)
-        return principal.with_fallbacks([fallback])
-    return principal
+        modelos.append(_crear_chat(cfg, api_key, fb_name).bind_tools(herramientas))
+    return modelos
+
+
+def construir_llm(cfg: Dict, api_key: str):
+    """LLM con fallback automático para uso NO-streaming (responder/chat)."""
+    modelos = construir_llms(cfg, api_key)
+    return modelos[0].with_fallbacks(modelos[1:]) if len(modelos) > 1 else modelos[0]
 
 
 # ------------------------------------------------------------
@@ -208,6 +218,65 @@ def responder(llm, recuperador: "Recuperador", system_instruction: str,
     mensajes = [SystemMessage(content=system_txt)] + historial + [HumanMessage(content=pregunta)]
     ai = _resolver_tool_calls(llm, mensajes)
     return (ai.content or "").strip(), resultados
+
+
+def responder_stream(llms, recuperador: "Recuperador", system_instruction: str,
+                     pregunta: str, historial: List = None, max_iter: int = 4):
+    """Versión *generadora* de `responder`: entrega el texto por trozos (streaming).
+
+    `llms` es la lista de `construir_llms` ([principal, fallback]). Transmite
+    con el primero; si falla ANTES de emitir texto (p. ej. 429), pasa al
+    siguiente. Maneja el bucle del agente: si un turno pide herramientas, las
+    ejecuta y continúa al turno siguiente (la respuesta final). Pensada para
+    `st.write_stream` en el front.
+    """
+    if not isinstance(llms, (list, tuple)):
+        llms = [llms]
+    historial = historial or []
+    resultados = recuperador.buscar(pregunta)
+    contexto = construir_contexto(resultados)
+    system_txt = _system_con_contexto(system_instruction, contexto)
+    mensajes = [SystemMessage(content=system_txt)] + historial + [HumanMessage(content=pregunta)]
+    tools_by_name = {"refrescar_cuotas": refrescar_cuotas}
+
+    for _ in range(max_iter):
+        acc = None
+        emitido = False
+        exito = False
+        ultimo_error = None
+        for modelo in llms:
+            try:
+                for chunk in modelo.stream(mensajes):
+                    acc = chunk if acc is None else acc + chunk
+                    if getattr(chunk, "content", ""):
+                        emitido = True
+                        yield chunk.content
+                exito = True
+                break
+            except Exception as e:  # noqa: BLE001
+                ultimo_error = e
+                if emitido:
+                    raise  # ya mostramos texto: no reintentar con otro modelo
+                acc = None
+                continue  # probar el siguiente modelo
+        if not exito:
+            raise ultimo_error or RuntimeError("Sin modelos disponibles")
+
+        tool_calls = getattr(acc, "tool_calls", None) if acc is not None else None
+        if not tool_calls:
+            return
+        # Turno de herramientas: sin texto que mostrar; ejecutar y seguir.
+        mensajes.append(acc)
+        for tc in tool_calls:
+            fn = tools_by_name.get(tc["name"])
+            if fn is None:
+                obs = f"Herramienta desconocida: {tc['name']}"
+            else:
+                try:
+                    obs = fn.invoke(tc["args"])
+                except Exception as e:  # noqa: BLE001
+                    obs = f"Error ejecutando {tc['name']}: {e}"
+            mensajes.append(ToolMessage(content=str(obs), tool_call_id=tc["id"]))
 
 
 def chat(cfg: Dict):
