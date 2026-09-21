@@ -7,8 +7,10 @@ Ejecutar:
 """
 
 import os
+from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
@@ -16,6 +18,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from ChatApuestas import (
     load_config, Recuperador, construir_llms, responder_stream, ENV_FILE, PROJECT_ROOT,
 )
+from apuestas import simulador
 
 CONFIG_PATH = PROJECT_ROOT / "config_apuestas.json"
 
@@ -190,45 +193,102 @@ with st.sidebar:
     )
 
 # ------------------------------------------------------------
-# CHAT
+# PESTAÑAS: ANALISTA (chat) + HISTÓRICO (bankroll)
 # ------------------------------------------------------------
-if "mensajes" not in st.session_state:
-    st.session_state.mensajes = []
+tab_chat, tab_hist = st.tabs(["💬 Analista", "📈 Histórico (bankroll)"])
 
-for msg in st.session_state.mensajes:
-    avatar = "⚽" if msg["role"] == "assistant" else "🧑"
-    with st.chat_message(msg["role"], avatar=avatar):
-        st.markdown(msg["content"])
+with tab_chat:
+    if "mensajes" not in st.session_state:
+        st.session_state.mensajes = []
 
-pregunta = st.chat_input("Pregúntale al analista…")
-if st.session_state.get("pendiente"):
-    pregunta = st.session_state.pop("pendiente")
+    for msg in st.session_state.mensajes:
+        avatar = "⚽" if msg["role"] == "assistant" else "🧑"
+        with st.chat_message(msg["role"], avatar=avatar):
+            st.markdown(msg["content"])
 
-if pregunta:
-    st.session_state.mensajes.append({"role": "user", "content": pregunta})
-    with st.chat_message("user", avatar="🧑"):
-        st.markdown(pregunta)
+    pregunta = st.chat_input("Pregúntale al analista…")
+    if st.session_state.get("pendiente"):
+        pregunta = st.session_state.pop("pendiente")
 
-    # memoria corta: últimas 3 parejas previas -> mensajes LangChain
-    historial = []
-    for m in st.session_state.mensajes[:-1][-6:]:
-        cls = HumanMessage if m["role"] == "user" else AIMessage
-        historial.append(cls(content=m["content"]))
+    if pregunta:
+        st.session_state.mensajes.append({"role": "user", "content": pregunta})
+        with st.chat_message("user", avatar="🧑"):
+            st.markdown(pregunta)
 
-    with st.chat_message("assistant", avatar="⚽"):
-        ph = st.empty()
-        # Indicador animado mientras el modelo "piensa" (antes del primer token).
-        ph.markdown('<div class="pensando"></div>', unsafe_allow_html=True)
-        respuesta = ""
-        try:
-            for trozo in responder_stream(llms, recuperador, sys_inst, pregunta, historial):
-                respuesta += trozo
-                ph.markdown(respuesta)  # el primer token reemplaza el "pensando…"
-            if not respuesta:
-                respuesta = "No obtuve respuesta del modelo. Intenta de nuevo."
+        # memoria corta: últimas 3 parejas previas -> mensajes LangChain
+        historial = []
+        for m in st.session_state.mensajes[:-1][-6:]:
+            cls = HumanMessage if m["role"] == "user" else AIMessage
+            historial.append(cls(content=m["content"]))
+
+        with st.chat_message("assistant", avatar="⚽"):
+            ph = st.empty()
+            # Indicador animado mientras el modelo "piensa" (antes del primer token).
+            ph.markdown('<div class="pensando"></div>', unsafe_allow_html=True)
+            respuesta = ""
+            try:
+                for trozo in responder_stream(llms, recuperador, sys_inst, pregunta, historial):
+                    respuesta += trozo
+                    ph.markdown(respuesta)  # el primer token reemplaza el "pensando…"
+                if not respuesta:
+                    respuesta = "No obtuve respuesta del modelo. Intenta de nuevo."
+                    ph.markdown(respuesta)
+            except Exception as e:  # noqa: BLE001
+                respuesta = f"Ups, el modelo falló (posible rate-limit del free tier): {e}"
                 ph.markdown(respuesta)
-        except Exception as e:  # noqa: BLE001
-            respuesta = f"Ups, el modelo falló (posible rate-limit del free tier): {e}"
-            ph.markdown(respuesta)
 
-    st.session_state.mensajes.append({"role": "assistant", "content": respuesta})
+        st.session_state.mensajes.append({"role": "assistant", "content": respuesta})
+
+with tab_hist:
+    ledger = simulador.cargar_ledger(cfg)
+    inicial = ledger["bankroll_inicial"]
+    actual = ledger["bankroll"]
+    hist = ledger["historial"]
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Bankroll inicial", f"${inicial:,.0f}")
+    m2.metric("Bankroll actual", f"${actual:,.0f}", f"{actual - inicial:+,.0f}")
+    m3.metric("Jornadas jugadas", len(hist))
+    if ledger.get("quebrado"):
+        st.error("💀 El agente quebró: bankroll en 0.")
+
+    if hist:
+        # Índice numérico de jornada (0 = inicio) para conservar el orden temporal;
+        # con etiquetas de fecha, Streamlit ordena alfabéticamente e invierte la curva.
+        puntos = [{"jornada": 0, "bankroll": inicial}]
+        for i, e in enumerate(hist, start=1):
+            puntos.append({"jornada": i, "bankroll": e["bankroll_final"]})
+        st.line_chart(pd.DataFrame(puntos).set_index("jornada")["bankroll"], height=240)
+        st.caption("Eje X: número de jornada (0 = inicio con el bankroll base).")
+
+        for e in reversed(hist):
+            signo = "🟢" if e["ganancia_total"] >= 0 else "🔴"
+            with st.expander(
+                f"{signo} {e['fecha']} · {e['bankroll_inicial']:,.0f} → "
+                f"{e['bankroll_final']:,.0f}  ({e['ganancia_total']:+,.0f})"
+            ):
+                filas = [{
+                    "Partido": a["partido"],
+                    "Pick": a["pick"],
+                    "Cuota": a["cuota"],
+                    "Apostado": round(a["stake"]),
+                    "Resultado": a["resultado_real"],
+                    "OK": "✓" if a["acierto"] else "✗",
+                    "Ganancia": round(a["ganancia"]),
+                } for a in e["apuestas"]]
+                st.dataframe(pd.DataFrame(filas), hide_index=True, use_container_width=True)
+    else:
+        st.info("Aún no hay jornadas simuladas. Pulsa **Simular jornada de hoy**.")
+
+    st.caption("El agente apuesta entre el 50% y el 100% del bankroll por jornada. "
+               "El presupuesto es acumulable hacia adelante.")
+
+    b1, b2 = st.columns(2)
+    if b1.button("▶️ Simular jornada de hoy", use_container_width=True):
+        api_key = os.getenv("OPENAI_API_KEY")
+        with st.spinner("El agente está analizando y apostando…"):
+            simulador.simular_dia(cfg, api_key, date.today().isoformat())
+        st.rerun()
+    if b2.button("♻️ Reiniciar simulación", use_container_width=True):
+        simulador.resetear(cfg)
+        st.rerun()

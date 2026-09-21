@@ -17,3 +17,6 @@ __pycache__/
 
 # Base vectorial generada del RAG de apuestas (se regenera con construye_corpus)
 deeplake_db/apuestas/
+
+# Ledger de la simulación de bankroll (estado local acumulable)
+apuestas/historico.json
