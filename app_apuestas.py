@@ -131,21 +131,31 @@ except FileNotFoundError:
 
 sys_inst = cfg.get("system_instruction", "Eres un analista de apuestas responsable.")
 liga = cfg["api"].get("league_name", "—")
-fecha = recuperador.metas[0].get("fecha", "hoy") if recuperador.metas else "hoy"
+fecha = recuperador.metas[0].get("fecha", "") if recuperador.metas else ""
+es_hoy = fecha == date.today().isoformat()
+etiqueta = "● En juego hoy" if es_hoy else "● Última jornada"
+sub_txt = "Jornada de hoy" if es_hoy else "Última jornada disponible"
 
 # ------------------------------------------------------------
-# HERO + PARTIDOS DE HOY
+# HERO + PARTIDOS DE LA JORNADA
 # ------------------------------------------------------------
 st.markdown(
     f"""
     <div class="hero">
         <h1>⚽ Analista de Apuestas</h1>
-        <div class="sub">{liga} · Jornada de hoy · Mercado 1X2</div>
-        <span class="tag">● En juego hoy · {fecha}</span>
+        <div class="sub">{liga} · {sub_txt} · Mercado 1X2</div>
+        <span class="tag">{etiqueta} · {fecha}</span>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+if not es_hoy:
+    st.warning(
+        f"📅 Hoy ({date.today().isoformat()}) no hay partidos de {liga}. "
+        f"Se muestra la última jornada disponible ({fecha}). "
+        "Puedes ver las anteriores en la pestaña **Jornadas pasadas**."
+    )
 
 if recuperador.metas:
     pills = ""
@@ -157,6 +167,10 @@ if recuperador.metas:
             f'<span class="fav">★ favorito: {fav_txt}</span></div>'
         )
     st.markdown(f'<div class="pills">{pills}</div>', unsafe_allow_html=True)
+
+_aviso = st.session_state.pop("aviso", None)
+if _aviso:
+    st.toast(_aviso, icon="✅")
 
 # ------------------------------------------------------------
 # SIDEBAR
@@ -180,10 +194,15 @@ with st.sidebar:
     if st.button("🔄 Actualizar partidos", use_container_width=True):
         from apuestas.construye_corpus import build_base
         with st.spinner("Consultando la API y reconstruyendo la base…"):
-            build_base(cfg)
-        st.cache_resource.clear()
-        st.session_state.pop("mensajes", None)
-        st.rerun()
+            fecha_cargada = build_base(cfg)
+        if fecha_cargada:
+            st.cache_resource.clear()
+            st.session_state.pop("mensajes", None)
+            st.session_state["aviso"] = f"Base actualizada con la jornada {fecha_cargada}."
+            st.rerun()
+        else:
+            st.warning("No hay partidos de la liga en la ventana disponible "
+                       "(hoy ±1 día). Se mantiene la última jornada cargada.")
     st.divider()
     st.markdown(
         '<p class="disc">⚠️ Solo para mayores de 18 años. Apostar implica riesgo '
@@ -195,7 +214,9 @@ with st.sidebar:
 # ------------------------------------------------------------
 # PESTAÑAS: ANALISTA (chat) + HISTÓRICO (bankroll)
 # ------------------------------------------------------------
-tab_chat, tab_hist = st.tabs(["💬 Analista", "📈 Histórico (bankroll)"])
+tab_chat, tab_pasadas, tab_hist = st.tabs(
+    ["💬 Analista", "📅 Jornadas pasadas", "📈 Histórico (bankroll)"]
+)
 
 with tab_chat:
     if "mensajes" not in st.session_state:
@@ -238,6 +259,35 @@ with tab_chat:
                 ph.markdown(respuesta)
 
         st.session_state.mensajes.append({"role": "assistant", "content": respuesta})
+
+with tab_pasadas:
+    from apuestas.construye_corpus import cargar_jornadas
+    jornadas = cargar_jornadas(cfg)
+    if not jornadas:
+        st.info("Aún no hay jornadas archivadas. Se guardan cada vez que actualizas "
+                "los partidos.")
+    else:
+        st.caption("Histórico de jornadas cargadas (partidos, favorito del mercado "
+                   "y resultado real).")
+        for f in sorted(jornadas.keys(), reverse=True):
+            partidos = jornadas[f]
+            marca = " · hoy" if f == date.today().isoformat() else ""
+            with st.expander(f"📅 {f}{marca} · {len(partidos)} partidos",
+                             expanded=(f == fecha)):
+                filas = []
+                for p in partidos:
+                    cuotas = p.get("cuotas") or {}
+                    fav = p.get("favorito")
+                    res = p.get("resultado")
+                    nombre = {"Home": p["home"], "Away": p["away"], "Draw": "Empate"}
+                    filas.append({
+                        "Partido": f"{p['home']} vs {p['away']}",
+                        "Favorito": nombre.get(fav, "—"),
+                        "Cuota fav": cuotas.get(fav) if fav else None,
+                        "Resultado": nombre.get(res, "por jugar" if res is None else "—"),
+                        "Fav OK": ("✓" if res == fav else "✗") if res else "—",
+                    })
+                st.dataframe(pd.DataFrame(filas), hide_index=True, use_container_width=True)
 
 with tab_hist:
     ledger = simulador.cargar_ledger(cfg)

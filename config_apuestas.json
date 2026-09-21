@@ -4,7 +4,8 @@
     "league_name": "Premier League",
     "fecha": "hoy",
     "timezone": "America/Bogota",
-    "market": "1x2"
+    "market": "1x2",
+    "jornadas_path": "apuestas/jornadas.json"
   },
 
   "deeplake": {

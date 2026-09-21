@@ -20,3 +20,6 @@ deeplake_db/apuestas/
 
 # Ledger de la simulación de bankroll (estado local acumulable)
 apuestas/historico.json
+
+# Archivo histórico de jornadas (partidos por fecha, se regenera)
+apuestas/jornadas.json

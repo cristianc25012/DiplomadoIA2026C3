@@ -13,7 +13,7 @@ Ejecutar:
 
 import os
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List
 
@@ -26,7 +26,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import DeepLake
 
 from apuestas.api_football import ApiFootball, ApiFootballError
-from apuestas.fichas import construir_ficha
+from apuestas.fichas import construir_ficha, agregar_cuotas
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -41,20 +41,55 @@ def _sanitizar_meta(meta: Dict) -> Dict:
     return {k: ("" if v is None else v) for k, v in meta.items()}
 
 
-def construir_documentos(api: ApiFootball, cfg: Dict) -> List[Document]:
+def resolver_jornada(api: ApiFootball, cfg: Dict):
+    """Devuelve (fecha, fixtures) de la liga.
+
+    Si cfg.api.fecha == "hoy", busca en la ventana que permite el plan free
+    (hoy, ayer, mañana) y usa la primera fecha con partidos, para no quedarse
+    con una base vacía los días que la liga no juega. Si es una fecha explícita,
+    usa esa.
+    """
     api_cfg = cfg["api"]
     league = int(api_cfg["league_id"])
     tz = api_cfg.get("timezone", "America/Bogota")
-    fecha = api_cfg.get("fecha", "hoy")
-    if fecha == "hoy":
-        fecha = date.today().isoformat()
+    fecha_cfg = api_cfg.get("fecha", "hoy")
 
-    print(f"Buscando partidos de {api_cfg.get('league_name', league)} "
-          f"({league}) para la fecha {fecha}...")
-    fixtures = api.partidos_de_hoy(fecha, league=league, timezone=tz)
-    print(f"Partidos encontrados: {len(fixtures)}")
+    if fecha_cfg != "hoy":
+        return fecha_cfg, api.partidos_de_hoy(fecha_cfg, league=league, timezone=tz)
+
+    hoy = date.today()
+    for cand in (hoy, hoy - timedelta(days=1), hoy + timedelta(days=1)):
+        f = cand.isoformat()
+        fixtures = api.partidos_de_hoy(f, league=league, timezone=tz)
+        if fixtures:
+            return f, fixtures
+    return hoy.isoformat(), []
+
+
+def _outcome(fx: Dict):
+    """'Home' | 'Draw' | 'Away' si el partido terminó; None si no."""
+    if fx["fixture"]["status"]["short"] not in ("FT", "AET", "PEN"):
+        return None
+    if fx["teams"]["home"].get("winner"):
+        return "Home"
+    if fx["teams"]["away"].get("winner"):
+        return "Away"
+    return "Draw"
+
+
+def construir_jornada(api: ApiFootball, cfg: Dict):
+    """Devuelve (fecha, documentos, snapshot) de la jornada resuelta.
+
+    - documentos: para la base Deep Lake (RAG).
+    - snapshot: resumen ligero de cada partido para el archivo de jornadas.
+    """
+    api_cfg = cfg["api"]
+    fecha, fixtures = resolver_jornada(api, cfg)
+    print(f"Jornada de {api_cfg.get('league_name', api_cfg['league_id'])} "
+          f"usada: {fecha} — {len(fixtures)} partidos")
 
     documentos: List[Document] = []
+    snapshot: List[Dict] = []
     for fx in fixtures:
         fid = fx["fixture"]["id"]
         home = fx["teams"]["home"]["name"]
@@ -72,18 +107,51 @@ def construir_documentos(api: ApiFootball, cfg: Dict) -> List[Document]:
 
         texto, meta = construir_ficha(fx, odds, inj)
         documentos.append(Document(page_content=texto, metadata=_sanitizar_meta(meta)))
+
+        ag = agregar_cuotas(odds)
+        snapshot.append({
+            "fixture_id": fid, "home": home, "away": away,
+            "favorito": ag["favorito"] if ag else None,
+            "cuotas": ag["cuotas"] if ag else None,
+            "resultado": _outcome(fx),
+        })
         print(f"  Ficha creada: {home} vs {away} (fixture {fid})")
 
-    return documentos
+    return fecha, documentos, snapshot
 
 
-def build_base(cfg: Dict) -> None:
+# ------------------------------------------------------------
+# ARCHIVO DE JORNADAS (histórico de partidos por fecha)
+# ------------------------------------------------------------
+def _jornadas_path(cfg: Dict) -> Path:
+    p = Path(cfg["api"].get("jornadas_path", "apuestas/jornadas.json"))
+    return p if p.is_absolute() else PROJECT_ROOT / p
+
+
+def cargar_jornadas(cfg: Dict) -> Dict:
+    path = _jornadas_path(cfg)
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def archivar_jornada(cfg: Dict, fecha: str, snapshot: List[Dict]) -> None:
+    data = cargar_jornadas(cfg)
+    data[fecha] = snapshot
+    with open(_jornadas_path(cfg), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def build_base(cfg: Dict):
+    """Construye la base y devuelve la fecha de la jornada cargada (o None)."""
     api = ApiFootball()
 
-    documentos = construir_documentos(api, cfg)
+    fecha, documentos, snapshot = construir_jornada(api, cfg)
     if not documentos:
-        print("No hay partidos para la fecha; no se crea la base.")
-        return
+        print("No hay partidos en la ventana disponible; no se crea la base.")
+        return None
+    archivar_jornada(cfg, fecha, snapshot)  # guarda la jornada en el histórico
 
     emb_cfg = cfg["embedding"]
     print(f"\nCargando modelo de embeddings: {emb_cfg['model_name']}")
@@ -107,8 +175,9 @@ def build_base(cfg: Dict) -> None:
         overwrite=bool(dl_cfg.get("overwrite", True)),
     )
 
-    print(f"\nBase creada con {len(documentos)} fichas.")
+    print(f"\nBase creada con {len(documentos)} fichas (jornada {fecha}).")
     print(f"Peticiones API usadas en esta construcción: {api.requests_realizadas}")
+    return fecha
 
 
 if __name__ == "__main__":
