@@ -1,10 +1,16 @@
 {
   "api": {
-    "league_id": 39,
-    "league_name": "Premier League",
+    "leagues": [
+      { "id": 39,  "name": "Premier League" },
+      { "id": 140, "name": "La Liga" },
+      { "id": 135, "name": "Serie A" },
+      { "id": 78,  "name": "Bundesliga" },
+      { "id": 61,  "name": "Ligue 1" }
+    ],
     "fecha": "hoy",
     "timezone": "America/Bogota",
     "market": "1x2",
+    "max_partidos": 40,
     "jornadas_path": "apuestas/jornadas.json"
   },
 
@@ -21,7 +27,7 @@
   },
 
   "retrieval": {
-    "k": 6
+    "k": 10
   },
 
   "simulacion": {

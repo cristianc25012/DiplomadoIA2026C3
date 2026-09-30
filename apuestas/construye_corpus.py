@@ -25,7 +25,7 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import DeepLake
 
-from apuestas.api_football import ApiFootball, ApiFootballError
+from apuestas.api_football import ApiFootball, ApiFootballError, ligas_config
 from apuestas.fichas import construir_ficha, agregar_cuotas
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -42,25 +42,25 @@ def _sanitizar_meta(meta: Dict) -> Dict:
 
 
 def resolver_jornada(api: ApiFootball, cfg: Dict):
-    """Devuelve (fecha, fixtures) de la liga.
+    """Devuelve (fecha, fixtures) de las ligas seguidas.
 
     Si cfg.api.fecha == "hoy", busca en la ventana que permite el plan free
-    (hoy, ayer, mañana) y usa la primera fecha con partidos, para no quedarse
-    con una base vacía los días que la liga no juega. Si es una fecha explícita,
-    usa esa.
+    (hoy, ayer, mañana) y usa la primera fecha con partidos en CUALQUIERA de las
+    ligas, para no quedarse con una base vacía los días que no juegan. Si es una
+    fecha explícita, usa esa.
     """
     api_cfg = cfg["api"]
-    league = int(api_cfg["league_id"])
+    ids, _ = ligas_config(api_cfg)
     tz = api_cfg.get("timezone", "America/Bogota")
     fecha_cfg = api_cfg.get("fecha", "hoy")
 
     if fecha_cfg != "hoy":
-        return fecha_cfg, api.partidos_de_hoy(fecha_cfg, league=league, timezone=tz)
+        return fecha_cfg, api.partidos_de_hoy(fecha_cfg, leagues=ids, timezone=tz)
 
     hoy = date.today()
     for cand in (hoy, hoy - timedelta(days=1), hoy + timedelta(days=1)):
         f = cand.isoformat()
-        fixtures = api.partidos_de_hoy(f, league=league, timezone=tz)
+        fixtures = api.partidos_de_hoy(f, leagues=ids, timezone=tz)
         if fixtures:
             return f, fixtures
     return hoy.isoformat(), []
@@ -84,9 +84,20 @@ def construir_jornada(api: ApiFootball, cfg: Dict):
     - snapshot: resumen ligero de cada partido para el archivo de jornadas.
     """
     api_cfg = cfg["api"]
+    _, nombres = ligas_config(api_cfg)
     fecha, fixtures = resolver_jornada(api, cfg)
-    print(f"Jornada de {api_cfg.get('league_name', api_cfg['league_id'])} "
-          f"usada: {fecha} — {len(fixtures)} partidos")
+
+    # Tope de partidos: cuida la cuota del plan free (cada partido = 2 peticiones).
+    # Se ordena por hora de inicio para quedarse con los primeros del día.
+    fixtures = sorted(fixtures, key=lambda fx: fx["fixture"].get("date", ""))
+    max_p = int(api_cfg.get("max_partidos", 40))
+    if len(fixtures) > max_p:
+        print(f"Aviso: {len(fixtures)} partidos exceden el tope ({max_p}); "
+              f"se recortan para cuidar la cuota de la API.")
+        fixtures = fixtures[:max_p]
+
+    etiqueta = ", ".join(nombres.values())
+    print(f"Jornada {fecha} — {len(fixtures)} partidos ({etiqueta})")
 
     documentos: List[Document] = []
     snapshot: List[Dict] = []
@@ -111,11 +122,12 @@ def construir_jornada(api: ApiFootball, cfg: Dict):
         ag = agregar_cuotas(odds)
         snapshot.append({
             "fixture_id": fid, "home": home, "away": away,
+            "liga": fx["league"]["name"],
             "favorito": ag["favorito"] if ag else None,
             "cuotas": ag["cuotas"] if ag else None,
             "resultado": _outcome(fx),
         })
-        print(f"  Ficha creada: {home} vs {away} (fixture {fid})")
+        print(f"  Ficha creada: [{fx['league']['name']}] {home} vs {away} (fixture {fid})")
 
     return fecha, documentos, snapshot
 

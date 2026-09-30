@@ -29,7 +29,7 @@ os.environ["TRANSFORMERS_NO_TF"] = "1"
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from apuestas.api_football import ApiFootball, ApiFootballError
+from apuestas.api_football import ApiFootball, ApiFootballError, ligas_config
 from apuestas.fichas import construir_ficha, agregar_cuotas
 from ChatApuestas import load_config, _crear_chat, PROJECT_ROOT, ENV_FILE
 
@@ -90,10 +90,10 @@ def _resultado_real(fx: Dict) -> Optional[str]:
 
 
 def datos_de_jornada(api: ApiFootball, cfg: Dict, fecha: str) -> List[Dict]:
-    """Partidos FINALIZADOS de la liga en la fecha, con cuotas y resultado real."""
-    league = int(cfg["api"]["league_id"])
+    """Partidos FINALIZADOS de las ligas en la fecha, con cuotas y resultado real."""
+    ids, _ = ligas_config(cfg["api"])
     tz = cfg["api"].get("timezone", "America/Bogota")
-    fixtures = api.partidos_de_hoy(fecha, league=league, timezone=tz)
+    fixtures = api.partidos_de_hoy(fecha, leagues=ids, timezone=tz)
 
     datos = []
     for fx in fixtures:

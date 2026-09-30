@@ -41,9 +41,13 @@ st.markdown(
     .stApp { background: var(--bg); color: var(--text);
              font-family:'IBM Plex Sans', system-ui, sans-serif; }
     #MainMenu, footer { visibility: hidden; }
-    header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stStatusWidget"] { display:none !important; }
-    .block-container { padding:0.7rem 1.6rem 1.6rem !important; max-width:100% !important; }
-    [data-testid="stMainBlockContainer"] { padding-top:0.7rem !important; }
+    /* Header transparente: se conserva el control para mostrar/ocultar el panel
+       lateral. Solo se ocultan el botón Deploy y el indicador de estado. */
+    header[data-testid="stHeader"] { background:transparent !important; box-shadow:none !important; }
+    [data-testid="stAppDeployButton"], [data-testid="stStatusWidget"],
+    [data-testid="stMainMenuButton"] { display:none !important; }
+    .block-container { padding:0.4rem 1.6rem 1.6rem !important; max-width:100% !important; }
+    [data-testid="stMainBlockContainer"] { padding-top:0.4rem !important; }
     h1,h2,h3 { font-family:'Space Grotesk', sans-serif; }
 
     /* barra superior */
@@ -165,6 +169,12 @@ st.markdown(
         28%,40%{content:"🧮 Calculando probabilidades…";} 42%,54%{content:"🔎 Revisando lesiones…";}
         56%,68%{content:"💧 Bebiendo agua…";} 70%,82%{content:"📈 Comparando cuotas…";}
         84%,98%{content:"🧠 Pensando el mejor pick…";} }
+
+    /* Chat del Analista: ocupa la altura disponible (sin hueco en pantallas grandes).
+       El alto lo fija el wrapper padre (flex:0 0 330px); lo estiramos al viewport. */
+    [data-testid="stLayoutWrapper"]:has(> [data-testid="stVerticalBlock"] > [data-testid="stLayoutWrapper"] > [data-testid="stChatMessage"]) {
+        height: calc(100vh - 232px) !important; flex: 1 1 auto !important;
+        max-height: none !important; min-height: 300px !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -220,9 +230,12 @@ if not st.session_state.get("_ready"):
 cfg, recuperador, llms = iniciar()
 
 from apuestas.construye_corpus import cargar_jornadas  # noqa: E402
+from apuestas.api_football import ligas_config  # noqa: E402
 
 sys_inst = cfg.get("system_instruction", "Eres un analista de apuestas responsable.")
-liga = cfg["api"].get("league_name", "—")
+_liga_ids, _liga_nombres = ligas_config(cfg["api"])
+liga_lista = list(_liga_nombres.values())
+liga = ("Top-5 de Europa" if len(liga_lista) > 1 else (liga_lista[0] if liga_lista else "—"))
 fecha = recuperador.metas[0].get("fecha", "") if recuperador.metas else ""
 es_hoy = fecha == date.today().isoformat()
 NOMBRE = {"Home": "local", "Away": "visitante", "Draw": "Empate"}
@@ -277,8 +290,9 @@ with st.sidebar:
                        ["💬  Analista", "🗓  Jornadas pasadas", "📈  Histórico"],
                        label_visibility="collapsed")
     st.divider()
-    st.markdown(f'<div class="info-lbl">Liga</div>'
-                f'<div style="font-size:13px;font-weight:600;margin-bottom:12px;">{liga}</div>'
+    ligas_html = " · ".join(liga_lista) if liga_lista else "—"
+    st.markdown(f'<div class="info-lbl">Ligas ({len(liga_lista)})</div>'
+                f'<div style="font-size:12px;font-weight:600;line-height:1.7;margin-bottom:12px;">{ligas_html}</div>'
                 f'<div class="info-lbl">Modelo</div>'
                 f'<span class="modelo-chip">{cfg["llm"]["model_name"]}</span>'
                 f'<div class="fichas-box"><span style="font-size:12px;color:#8a94a3;">Fichas en base</span>'
@@ -296,17 +310,18 @@ with st.sidebar:
             st.warning("No hay partidos en la ventana disponible (hoy ±1 día).")
 
 # ------------------------------------------------------------
-# TOP BAR
+# TOP BAR (se omite en Analista para dar toda la altura al chat)
 # ------------------------------------------------------------
-titulos = {"💬": "Analista", "🗓": "Jornadas pasadas", "📈": "Histórico · Bankroll"}
-titulo = titulos.get(seccion[:1], "Analista")
-st.markdown(
-    f'<div class="topbar"><div><h1>{titulo}</h1>'
-    f'<div class="sub">{liga} · Mercado 1X2 · '
-    f'{"jornada de hoy" if es_hoy else "última jornada disponible"}</div></div>'
-    f'<span class="jornada-pill"><span class="dot"></span>JORNADA {fecha}</span></div>',
-    unsafe_allow_html=True,
-)
+titulos = {"🗓": "Jornadas pasadas", "📈": "Histórico · Bankroll"}
+if not seccion.startswith("💬"):
+    titulo = titulos.get(seccion[:1], "Analista")
+    st.markdown(
+        f'<div class="topbar"><div><h1>{titulo}</h1>'
+        f'<div class="sub">{liga} · Mercado 1X2 · '
+        f'{"jornada de hoy" if es_hoy else "última jornada disponible"}</div></div>'
+        f'<span class="jornada-pill"><span class="dot"></span>JORNADA {fecha}</span></div>',
+        unsafe_allow_html=True,
+    )
 
 # ============================================================
 # ANALISTA
@@ -376,26 +391,30 @@ if seccion.startswith("💬"):
 
     with col_matches:
         partidos = cargar_jornadas(cfg).get(fecha, [])
-        st.markdown(f'<div style="display:flex;align-items:center;justify-content:space-between;">'
-                    f'<span class="sec-title">Jornada actual</span>'
+        st.markdown(f'<div style="display:flex;align-items:baseline;justify-content:space-between;">'
+                    f'<span class="sec-title">Jornada actual '
+                    f'<span style="color:#8a94a3;font-weight:500;letter-spacing:.02em;">· {fecha}</span></span>'
                     f'<span style="font-size:12px;color:#69727f;">{len(partidos)} partidos</span></div>',
                     unsafe_allow_html=True)
         if not es_hoy:
             st.markdown(f'<div style="font-size:12px;color:#c9ff6e;background:rgba(184,255,60,.07);'
                         f'border:1px solid rgba(184,255,60,.2);border-radius:9px;padding:8px 11px;'
-                        f'margin-bottom:10px;">📅 Hoy no hay partidos de {liga}. Mostrando la última '
-                        f'jornada ({fecha}).</div>', unsafe_allow_html=True)
+                        f'margin-bottom:10px;">📅 Hoy no hay partidos en las ligas seguidas. '
+                        f'Mostrando la última jornada disponible ({fecha}).</div>', unsafe_allow_html=True)
         tarjetas = ""
         for p in partidos:
+            lg = p.get("liga", "")
+            lg_html = (f'<div style="font-size:10px;color:#69727f;text-transform:uppercase;'
+                       f'letter-spacing:.6px;margin-bottom:4px;">{lg}</div>') if lg else ""
             fav = p.get("favorito")
             fav_nom = {"Home": p["home"], "Away": p["away"], "Draw": "Empate"}.get(fav, "—")
             odd = (p.get("cuotas") or {}).get(fav)
-            tarjetas += (f'<div class="match"><div class="row1"><span>{p["home"]}</span>'
-                         f'<span class="vs">VS</span><span>{p["away"]}</span></div>'
-                         f'<div class="row2"><span class="fav">★ {fav_nom}</span>'
-                         f'<span class="odd">{odd:.2f}</span></div></div>') if odd else (
-                         f'<div class="match"><div class="row1"><span>{p["home"]}</span>'
-                         f'<span class="vs">VS</span><span>{p["away"]}</span></div></div>')
+            cuerpo = (f'<div class="row1"><span>{p["home"]}</span>'
+                      f'<span class="vs">VS</span><span>{p["away"]}</span></div>')
+            if odd:
+                cuerpo += (f'<div class="row2"><span class="fav">★ {fav_nom}</span>'
+                           f'<span class="odd">{odd:.2f}</span></div>')
+            tarjetas += f'<div class="match">{lg_html}{cuerpo}</div>'
         st.markdown(f'<div>{tarjetas}</div>', unsafe_allow_html=True)
 
 # ============================================================
@@ -414,23 +433,26 @@ elif seccion.startswith("🗓"):
         filas = ""
         for p in partidos:
             fav = p.get("favorito"); res = p.get("resultado")
+            lg = p.get("liga", "—")
             fav_nom = {"Home": p["home"], "Away": p["away"], "Draw": "Empate"}.get(fav, "—")
             res_nom = {"Home": p["home"], "Away": p["away"], "Draw": "Empate"}.get(res, "por jugar")
             odd = (p.get("cuotas") or {}).get(fav)
             ok = "✓" if (res and res == fav) else ("✕" if res else "·")
             okc = "color:#35d07f;" if (res and res == fav) else ("color:#ff5a4d;" if res else "color:#69727f;")
-            filas += (f'<tr><td>{p["home"]} vs {p["away"]}</td><td>{fav_nom}</td>'
+            filas += (f'<tr><td>{p["home"]} vs {p["away"]}</td>'
+                      f'<td style="color:#8a94a3;">{lg}</td><td>{fav_nom}</td>'
                       f'<td class="mono">{odd:.2f}</td><td>{res_nom}</td>'
                       f'<td class="mono" style="text-align:center;font-weight:700;{okc}">{ok}</td></tr>'
                       if odd else
-                      f'<tr><td>{p["home"]} vs {p["away"]}</td><td>{fav_nom}</td>'
+                      f'<tr><td>{p["home"]} vs {p["away"]}</td>'
+                      f'<td style="color:#8a94a3;">{lg}</td><td>{fav_nom}</td>'
                       f'<td class="mono">—</td><td>{res_nom}</td>'
                       f'<td class="mono" style="text-align:center;{okc}">{ok}</td></tr>')
         st.markdown(
             f'<div class="jcard"><div class="head"><span>🗓</span>'
             f'<span class="d">{f}</span><span class="c">· {len(partidos)} partidos</span>'
             f'<span class="badge" style="color:#c9ff6e;">favorito {aciertos}/{con_res}</span></div>'
-            f'<table class="dc"><thead><tr><th>Partido</th><th>Favorito</th>'
+            f'<table class="dc"><thead><tr><th>Partido</th><th>Liga</th><th>Favorito</th>'
             f'<th class="r">Cuota</th><th>Resultado</th><th style="text-align:center;">Fav</th></tr></thead>'
             f'<tbody>{filas}</tbody></table></div>',
             unsafe_allow_html=True)

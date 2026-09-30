@@ -14,8 +14,9 @@ para que puedas vigilar el consumo durante la construcción del corpus.
 
 import os
 import time
+from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -26,6 +27,21 @@ ENV_FILE = PROJECT_ROOT / "secrets" / ".env"
 BASE_URL = "https://v3.football.api-sports.io"
 
 
+def ligas_config(api_cfg: Dict) -> Tuple[List[int], Dict[int, str]]:
+    """Lee las ligas de la config y devuelve (ids, {id: nombre}).
+
+    Acepta el formato multi-liga `leagues` (lista de {id, name}) y, por
+    compatibilidad, el antiguo `league_id`/`league_name` (una sola liga).
+    """
+    ligas = api_cfg.get("leagues")
+    if ligas:
+        ids = [int(l["id"]) for l in ligas]
+        nombres = {int(l["id"]): l.get("name", str(l["id"])) for l in ligas}
+        return ids, nombres
+    lid = int(api_cfg["league_id"])
+    return [lid], {lid: api_cfg.get("league_name", str(lid))}
+
+
 class ApiFootballError(RuntimeError):
     """Error devuelto por la API o por la validación de la respuesta."""
 
@@ -33,7 +49,8 @@ class ApiFootballError(RuntimeError):
 class ApiFootball:
     """Envoltura mínima sobre los endpoints que necesita el RAG de apuestas."""
 
-    def __init__(self, api_key: Optional[str] = None, timeout: int = 30):
+    def __init__(self, api_key: Optional[str] = None, timeout: int = 30,
+                 rate_limit_min: int = 10):
         if api_key is None:
             load_dotenv(ENV_FILE)
             api_key = os.getenv("APIFOOTBALL_API_KEY")
@@ -45,15 +62,36 @@ class ApiFootball:
         self._headers = {"x-apisports-key": api_key.strip()}
         self._timeout = timeout
         self.requests_realizadas = 0
+        # Limitador de ritmo (plan free: 10 peticiones/min). Ventana deslizante:
+        # solo duerme si en los últimos 60s ya se hicieron `rate_limit_min` llamadas.
+        self._rate_min = int(rate_limit_min) if rate_limit_min else 0
+        self._marcas: deque = deque()
 
     # ------------------------------------------------------------------
     # Núcleo
     # ------------------------------------------------------------------
+    def _throttle(self) -> None:
+        """Respeta el límite de N peticiones por minuto sin desperdiciar tiempo."""
+        if not self._rate_min:
+            return
+        ahora = time.monotonic()
+        while self._marcas and ahora - self._marcas[0] >= 60:
+            self._marcas.popleft()
+        if len(self._marcas) >= self._rate_min:
+            espera = 60 - (ahora - self._marcas[0]) + 0.1
+            if espera > 0:
+                time.sleep(espera)
+            ahora = time.monotonic()
+            while self._marcas and ahora - self._marcas[0] >= 60:
+                self._marcas.popleft()
+        self._marcas.append(time.monotonic())
+
     def _get(self, path: str, params: Optional[Dict] = None) -> List[Dict]:
         """Hace GET a un endpoint y devuelve la lista `response`.
 
         Lanza ApiFootballError si la API reporta errores o un HTTP != 200.
         """
+        self._throttle()
         url = f"{BASE_URL}/{path.lstrip('/')}"
         r = requests.get(url, headers=self._headers, params=params or {}, timeout=self._timeout)
         self.requests_realizadas += 1
@@ -77,16 +115,23 @@ class ApiFootball:
         return resp if isinstance(resp, dict) else (resp[0] if resp else {})
 
     def partidos_de_hoy(self, fecha: str, league: Optional[int] = None,
+                        leagues: Optional[Iterable[int]] = None,
                         timezone: str = "America/Bogota") -> List[Dict]:
-        """Partidos de una fecha (YYYY-MM-DD), opcionalmente filtrados por liga.
+        """Partidos de una fecha (YYYY-MM-DD), filtrados por una o varias ligas.
 
         En el PLAN FREE la API exige `season` si se envía `league`, y solo
         admite fechas dentro de la ventana de hoy (±1 día). Por eso pedimos
-        TODOS los partidos de la fecha (sin `league`) y filtramos por liga en
-        el cliente. Así obtenemos los partidos reales del día.
+        TODOS los partidos de la fecha (sin `league`) y filtramos en el cliente.
+        Así obtenemos los partidos reales del día con UNA sola petición,
+        aunque sigamos varias ligas. Usa `leagues` (colección de ids) para
+        multi-liga o `league` (un id) para una sola.
         """
         fixtures = self._get("fixtures", {"date": fecha, "timezone": timezone})
-        if league is not None:
+        if leagues is not None:
+            permitidas = {int(x) for x in leagues}
+            fixtures = [fx for fx in fixtures
+                        if fx.get("league", {}).get("id") in permitidas]
+        elif league is not None:
             fixtures = [fx for fx in fixtures if fx.get("league", {}).get("id") == league]
         return fixtures
 
